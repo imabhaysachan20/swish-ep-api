@@ -11,9 +11,9 @@ swe.set_ephe_path("ephe")
 swe.set_sid_mode(swe.SIDM_LAHIRI)
 
 class BirthDetails(BaseModel):
-    date: str  # e.g. "2002-11-02"
-    time: str  # e.g. "21:09"
-    timezone: str  # e.g. "Asia/Kolkata"
+    date: str
+    time: str
+    timezone: str
     latitude: float
     longitude: float
 
@@ -33,15 +33,51 @@ ZODIAC_SIGNS = [
     "Libra", "Scorpio", "Sagittarius", "Capricorn", "Aquarius", "Pisces"
 ]
 
+NAKSHATRAS = [
+    "Ashwini", "Bharani", "Krittika", "Rohini", "Mrigashirsha", "Ardra", "Punarvasu",
+    "Pushya", "Ashlesha", "Magha", "Purva Phalguni", "Uttara Phalguni", "Hasta",
+    "Chitra", "Swati", "Vishakha", "Anuradha", "Jyeshtha", "Mula", "Purva Ashadha",
+    "Uttara Ashadha", "Shravana", "Dhanishta", "Shatabhisha", "Purva Bhadrapada",
+    "Uttara Bhadrapada", "Revati"
+]
+
+NAKSHATRA_LORDS = [
+    "Ketu", "Venus", "Sun", "Moon", "Mars", "Rahu", "Jupiter", "Saturn", "Mercury",
+    "Ketu", "Venus", "Sun", "Moon", "Mars", "Rahu", "Jupiter", "Saturn", "Mercury",
+    "Ketu", "Venus", "Sun", "Moon", "Mars", "Rahu", "Jupiter", "Saturn", "Mercury"
+]
+
+VIMSHOTTARI_YEARS = {
+    "Ketu": 7, "Venus": 20, "Sun": 6, "Moon": 10, "Mars": 7,
+    "Rahu": 18, "Jupiter": 16, "Saturn": 19, "Mercury": 17
+}
+
 def get_sign(degree: float):
     return ZODIAC_SIGNS[int(degree // 30)]
+
+def get_nakshatra(moon_long):
+    index = int(moon_long // (360 / 27))
+    return NAKSHATRAS[index], NAKSHATRA_LORDS[index], index, (moon_long % (360 / 27)) / (360 / 27)
+
+def calculate_dasha(start_lord, nakshatra_frac, birth_dt):
+    sequence = [
+        "Ketu", "Venus", "Sun", "Moon", "Mars", 
+        "Rahu", "Jupiter", "Saturn", "Mercury"
+    ]
+    idx = sequence.index(start_lord)
+    years_left = VIMSHOTTARI_YEARS[start_lord] * (1 - nakshatra_frac)
+    end_dt = birth_dt + datetime.timedelta(days=years_left*365.25)
+    return {
+        "current": start_lord,
+        "ends": end_dt.strftime("%Y-%m")
+    }
 
 def to_utc_julian(date_str, time_str, tz_str):
     local = pytz.timezone(tz_str)
     dt_local = local.localize(datetime.datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M"))
     dt_utc = dt_local.astimezone(pytz.utc)
     jd = swe.julday(dt_utc.year, dt_utc.month, dt_utc.day, dt_utc.hour + dt_utc.minute / 60.0)
-    return jd
+    return jd, dt_utc
 
 def determine_house(degree, house_cusps):
     for i in range(12):
@@ -57,7 +93,7 @@ def determine_house(degree, house_cusps):
 
 @app.post("/vedic-chart")
 def generate_chart(birth: BirthDetails):
-    jd_ut = to_utc_julian(birth.date, birth.time, birth.timezone)
+    jd_ut, dt_utc = to_utc_julian(birth.date, birth.time, birth.timezone)
 
     cusps, ascmc = swe.houses(jd_ut, birth.latitude, birth.longitude, b'P')
     asc_deg = round(ascmc[0], 4)
@@ -65,6 +101,8 @@ def generate_chart(birth: BirthDetails):
     asc_sign = get_sign(asc_deg)
 
     planetary_positions = {}
+
+    moon_long = None
 
     for name, code in PLANETS.items():
         pos, _ = swe.calc_ut(jd_ut, code, swe.FLG_SIDEREAL)
@@ -76,8 +114,9 @@ def generate_chart(birth: BirthDetails):
             "sign": sign,
             "house": house
         }
+        if name == "Moon":
+            moon_long = deg
 
-    # Add Ketu
     rahu_deg = planetary_positions["Rahu"]["degree"] + (ZODIAC_SIGNS.index(planetary_positions["Rahu"]["sign"]) * 30)
     ketu_deg = (rahu_deg + 180) % 360
     ketu_sign = get_sign(ketu_deg)
@@ -88,6 +127,10 @@ def generate_chart(birth: BirthDetails):
         "house": ketu_house
     }
 
+    # 🌙 Nakshatra + Dasha
+    nakshatra_name, nakshatra_lord, nakshatra_index, nakshatra_frac = get_nakshatra(moon_long)
+    dasha = calculate_dasha(nakshatra_lord, nakshatra_frac, dt_utc)
+
     return {
         "julian_day": jd_ut,
         "ascendant": {
@@ -95,5 +138,7 @@ def generate_chart(birth: BirthDetails):
             "sign": asc_sign
         },
         "planetary_positions": planetary_positions,
-        "house_cusps": house_cusps
+        "house_cusps": house_cusps,
+        "moon_nakshatra": nakshatra_name,
+        "current_dasha": dasha
     }
